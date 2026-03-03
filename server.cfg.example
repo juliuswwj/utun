@@ -1,0 +1,15 @@
+# utun Server Configuration Example
+
+# Server Listening UDP Ports
+ports=10000,10001
+
+# TUN Interface IP and CIDR
+ip=10.0.0.1/24
+
+# TUN Interface Name (default: utun0)
+tun=utun0
+
+# Client Mappings (StaticIP=PublicKey)
+# Format: <Client IP>=<Public Key>
+10.0.0.2=f0e1d2c3b4a5968778695a4b3c2d1e0f0e1d2c3b4a5968778695a4b3c2d1e0f0
+10.0.0.3=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
