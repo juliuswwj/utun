@@ -14,7 +14,8 @@ import (
 // PeerConfig defines the configuration for a single peer.
 type PeerConfig struct {
 	PublicKey string
-	StaticIP  string
+	StaticIP  string   // Main TUN IP for this peer
+	Subnets   []string // Additional subnets managed by this peer
 }
 
 // Config defines the overall server and routing configuration.
@@ -85,10 +86,19 @@ func (m *Manager) Reload() error {
 		case "tun":
 			cfg.TunName = val
 		default:
-			// Assume it's a peer mapping: static_ip=public_key
+			// Peer mapping: <StaticIP>=<PublicKey>[,subnet1,subnet2...]
+			valParts := strings.Split(val, ",")
+			pubKey := strings.TrimSpace(valParts[0])
+			var subnets []string
+			if len(valParts) > 1 {
+				for _, s := range valParts[1:] {
+					subnets = append(subnets, strings.TrimSpace(s))
+				}
+			}
 			peers = append(peers, PeerConfig{
 				StaticIP:  key,
-				PublicKey: val,
+				PublicKey: pubKey,
+				Subnets:   subnets,
 			})
 		}
 	}

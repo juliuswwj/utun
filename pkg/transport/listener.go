@@ -67,7 +67,7 @@ func (l *MultiPortListener) listen(conn *net.UDPConn) {
 				continue
 			}
 
-			if buf[0] == HeaderHandshake {
+			if buf[0] == HeaderHandshake || buf[0] == HeaderHandshakeAck {
 				raw := make([]byte, n)
 				copy(raw, buf[:n])
 				l.packetCh <- IncomingPacket{Addr: addr, Raw: raw}

@@ -24,6 +24,7 @@ type clientBundle struct {
 
 func TestFullSystemIntegration(t *testing.T) {
 	// 1. Prepare Keys
+	serverPub, serverPriv, _ := crypto.GenerateKeyPair()
 	pub1, priv1, _ := crypto.GenerateKeyPair()
 	pub2, priv2, _ := crypto.GenerateKeyPair()
 	
@@ -53,6 +54,7 @@ tun=utun_test
 	serverRouter := NewRouter(serverSm)
 	serverTun := tun.NewMockDevice()
 	serverEngine := NewEngine(serverTun, serverRouter, serverSm, cfgMgr)
+	serverEngine.SetKeys(serverPriv, nil)
 	
 	// Use dynamic ports 0,0 but we need to know what they are
 	serverListener := transport.NewMultiPortListener([]int{0, 0}) 
@@ -70,8 +72,8 @@ tun=utun_test
 	serverAddr2 := serverAddrs[1]
 
 	// 4. Setup Clients (with CIDR and multi-server-addrs)
-	client1 := setupClient(t, ctx, "10.8.8.2/24", priv1, serverAddrs)
-	client2 := setupClient(t, ctx, "10.8.8.3/24", priv2, serverAddrs)
+	client1 := setupClient(t, ctx, "10.8.8.2/24", priv1, serverAddrs, serverPub)
+	client2 := setupClient(t, ctx, "10.8.8.3/24", priv2, serverAddrs, serverPub)
 
 	// 5. Perform Handshakes
 	sendHandshake(client1.listener, priv1, serverAddr1)
@@ -137,7 +139,7 @@ tun=utun_test
 	}
 }
 
-func setupClient(t *testing.T, ctx context.Context, ipCIDR string, priv ed25519.PrivateKey, serverAddrs []*net.UDPAddr) *clientBundle {
+func setupClient(t *testing.T, ctx context.Context, ipCIDR string, priv ed25519.PrivateKey, serverAddrs []*net.UDPAddr, serverPub ed25519.PublicKey) *clientBundle {
 	mockTun := tun.NewMockDevice()
 	sm := transport.NewSessionManager()
 	r := NewRouter(sm)
@@ -156,9 +158,14 @@ func setupClient(t *testing.T, ctx context.Context, ipCIDR string, priv ed25519.
 		StaticIP:    "10.8.8.1",
 	}
 	sm.Add(serverSession)
-	r.AddSubnet(ipnet.String(), serverSession)
 	
-	engine := NewEngine(mockTun, r, sm, nil)
+	engine := NewEngine(nil, r, sm, nil)
+	engine.SetKeys(priv, serverPub)
+	engine.OnHandshakeAck = func(clientIP string, subnets []string) {
+		engine.SetTUNDevice(mockTun)
+		r.AddSubnet(ipnet.String(), serverSession)
+	}
+	
 	listener := transport.NewMultiPortListener([]int{0, 0})
 	listener.Start()
 	engine.SetListener(listener)

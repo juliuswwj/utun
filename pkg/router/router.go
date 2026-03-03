@@ -3,6 +3,7 @@ package router
 import (
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"utun/pkg/transport"
 )
@@ -26,6 +27,9 @@ func NewRouter(sm *transport.SessionManager) *Router {
 
 // AddSubnet adds a subnet route to the router.
 func (r *Router) AddSubnet(cidr string, session *transport.Session) error {
+	if !strings.Contains(cidr, "/") {
+		cidr += "/32"
+	}
 	_, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return err

@@ -9,7 +9,7 @@ ip=10.0.0.1/24
 # TUN Interface Name (default: utun0)
 tun=utun0
 
-# Client Mappings (StaticIP=PublicKey)
-# Format: <Client IP>=<Public Key>
+# Client Mappings (<Client IP>=<Public Key>[,subnet1,subnet2...])
+# The client will automatically receive this IP and configured subnets.
 10.0.0.2=f0e1d2c3b4a5968778695a4b3c2d1e0f0e1d2c3b4a5968778695a4b3c2d1e0f0
-10.0.0.3=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+10.0.0.3=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff,192.168.1.0/24,10.10.0.0/24

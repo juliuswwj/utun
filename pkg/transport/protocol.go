@@ -4,16 +4,18 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"strings"
 	"time"
 )
 
 const (
-	HeaderData      = 0x43
-	HeaderHandshake = 0x81
-	HeaderSize      = 1 + 8 // 1 byte header + 8 byte SessionID/Timestamp
-	NonceSize       = 12
-	MaxPadding      = 256
-	MinPacketSize   = HeaderSize + NonceSize + 1
+	HeaderData         = 0x43
+	HeaderHandshake    = 0x81
+	HeaderHandshakeAck = 0x82
+	HeaderSize         = 1 + 8 // 1 byte header + 8 byte SessionID/Timestamp
+	NonceSize          = 12
+	MaxPadding         = 256
+	MinPacketSize      = HeaderSize + NonceSize + 1
 )
 
 var (
@@ -52,6 +54,68 @@ func VerifyHandshake(data []byte, pub ed25519.PublicKey) bool {
 	}
 
 	return ed25519.Verify(pub, data[1:9], data[9:73])
+}
+
+// CreateHandshakeAck creates a signed acknowledgement packet containing client IP and subnets.
+// Format: Header(1) + Timestamp(8) + Sig(64) + Payload(...)
+func CreateHandshakeAck(priv ed25519.PrivateKey, clientIP string, subnets []string) []byte {
+	payload := clientIP
+	if len(subnets) > 0 {
+		payload += "," + strings.Join(subnets, ",")
+	}
+	payloadBytes := []byte(payload)
+
+	packet := make([]byte, 1+8+64+len(payloadBytes))
+	packet[0] = HeaderHandshakeAck
+	
+	ts := time.Now().Unix()
+	for i := 0; i < 8; i++ {
+		packet[1+i] = byte(ts >> (i * 8))
+	}
+
+	// Sign Header + Timestamp + Payload (independently of signature slot in packet)
+	toSign := make([]byte, 9+len(payloadBytes))
+	copy(toSign[0:9], packet[0:9])
+	copy(toSign[9:], payloadBytes)
+	
+	sig := ed25519.Sign(priv, toSign)
+	copy(packet[9:], sig)
+	copy(packet[73:], payloadBytes)
+	
+	return packet
+}
+
+// VerifyHandshakeAck verifies an ACK and returns (clientIP, subnets, error)
+func VerifyHandshakeAck(data []byte, pub ed25519.PublicKey) (string, []string, error) {
+	if len(data) < 73 || data[0] != HeaderHandshakeAck {
+		return "", nil, ErrInvalidHeader
+	}
+	
+	var ts int64
+	for i := 0; i < 8; i++ {
+		ts |= int64(data[1+i]) << (i * 8)
+	}
+
+	now := time.Now().Unix()
+	if now-ts > 60 || ts-now > 60 {
+		return "", nil, errors.New("ack timestamp expired")
+	}
+
+	payloadBytes := data[73:]
+	toSign := make([]byte, 9+len(payloadBytes))
+	copy(toSign[0:9], data[0:9])
+	copy(toSign[9:], payloadBytes)
+
+	if !ed25519.Verify(pub, toSign, data[9:73]) {
+		return "", nil, errors.New("invalid ack signature")
+	}
+
+	parts := strings.Split(string(payloadBytes), ",")
+	if len(parts) == 0 {
+		return "", nil, errors.New("empty ack payload")
+	}
+
+	return parts[0], parts[1:], nil
 }
 
 // Seal encapsulates the payload into an obfuscated UDP packet.
