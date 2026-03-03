@@ -184,7 +184,7 @@ func runClient() {
 		RemoteAddrs: serverAddrs,
 		Cipher:      ciph,
 		LastSeen:    time.Now(),
-		StaticIP:    "10.0.0.1",
+		StaticIP:    "", // Client doesn't know server's TUN IP yet; it's added to router via subnets later
 	}
 	sm.Add(serverSession)
 	

@@ -155,7 +155,7 @@ func setupClient(t *testing.T, ctx context.Context, ipCIDR string, priv ed25519.
 		RemoteAddrs: serverAddrs,
 		Cipher:      ciph,
 		LastSeen:    time.Now(),
-		StaticIP:    "10.8.8.1",
+		StaticIP:    "", // Not strictly needed for tests as we use direct subnets
 	}
 	sm.Add(serverSession)
 	
