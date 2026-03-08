@@ -73,11 +73,16 @@ func generateKeys() {
 }
 
 func runServer() {
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: utun server <config_file>")
+	fs := flag.NewFlagSet("server", flag.ExitOnError)
+	keyPath := fs.String("key", "private.key", "Path to private key")
+	mockMode := fs.Bool("mock", false, "Use mock TUN device")
+	fs.Parse(os.Args[2:])
+
+	if fs.NArg() < 1 {
+		fmt.Println("Usage: utun server [options] <config_file>")
 		return
 	}
-	configPath := os.Args[2]
+	configPath := fs.Arg(0)
 
 	cfgMgr, err := config.NewManager(configPath)
 	if err != nil {
@@ -87,10 +92,9 @@ func runServer() {
 	cfg := cfgMgr.Get()
 
 	// Server private key for signing HandshakeAcks
-	keyPath := "private.key"
-	privB, err := crypto.LoadKeyFromFile(keyPath)
+	privB, err := crypto.LoadKeyFromFile(*keyPath)
 	if err != nil {
-		fmt.Printf("Failed to load server private key: %v\n", err)
+		fmt.Printf("Failed to load server private key from %s: %v\n", *keyPath, err)
 		return
 	}
 	priv := ed25519.PrivateKey(privB)
@@ -102,10 +106,16 @@ func runServer() {
 	}
 	maskLen, _ := ipnet.Mask.Size()
 
-	t, err := tun.NewDevice(cfg.TunName)
-	if err != nil {
-		fmt.Printf("TUN error: %v\n", err)
-		return
+	var t tun.TUNDevice
+	if *mockMode {
+		t = tun.NewMockDevice()
+		fmt.Println("Using mock TUN device")
+	} else {
+		t, err = tun.NewDevice(cfg.TunName)
+		if err != nil {
+			fmt.Printf("TUN error: %v\n", err)
+			return
+		}
 	}
 	t.Configure(ip.String(), strconv.Itoa(maskLen), 1400)
 
@@ -136,6 +146,7 @@ func runClient() {
 	tunName := fs.String("tun", "utun1", "TUN interface name")
 	numSockets := fs.Int("sockets", 2, "Number of local sockets (2-8)")
 	proxyARP := fs.String("proxyarp", "", "Interface to enable Proxy ARP on (e.g., eth0)")
+	mockMode := fs.Bool("mock", false, "Use mock TUN device")
 	fs.Parse(os.Args[2:])
 
 	if *serverAddrStr == "" || *serverPubHex == "" {
@@ -205,10 +216,16 @@ func runClient() {
 			}
 			maskLen, _ := ipnet.Mask.Size()
 			
-			t, err := tun.NewDevice(*tunName)
-			if err != nil {
-				fmt.Printf("Failed to create TUN: %v\n", err)
-				return
+			var t tun.TUNDevice
+			if *mockMode {
+				t = tun.NewMockDevice()
+				fmt.Println("Using mock TUN device")
+			} else {
+				t, err = tun.NewDevice(*tunName)
+				if err != nil {
+					fmt.Printf("Failed to create TUN: %v\n", err)
+					return
+				}
 			}
 			t.Configure(ip.String(), strconv.Itoa(maskLen), 1400)
 			
@@ -260,6 +277,8 @@ func runClient() {
 			// Rotate the oldest socket before sending heartbeat/handshake
 			if err := listener.RotateOne(); err != nil {
 				fmt.Printf("Socket rotation failed: %v\n", err)
+			} else {
+				fmt.Printf("Socket rotated. Current sockets: %d\n", len(listener.AllLocalAddrs()))
 			}
 			
 			handshake := transport.CreateHandshake(priv)
@@ -267,12 +286,17 @@ func runClient() {
 			dst := serverAddrs[rnd.Intn(len(serverAddrs))]
 			listener.WriteTo(handshake, dst)
 			
-			delay := 5 + rnd.Intn(175)
+			delay := 5 + rnd.Intn(10) // Speed up for testing
 			time.Sleep(time.Duration(delay) * time.Second)
 		}
 	}()
 
-	fmt.Printf("Client started. Sockets: %d, Server Ports: %d, TUN: %s (waiting for config)\n", 
-		*numSockets, len(serverAddrs), *tunName)
+	if *mockMode {
+		fmt.Printf("Client started (MOCK). Sockets: %d, Server Ports: %d, TUN: mock-tun (waiting for config)\n", 
+			*numSockets, len(serverAddrs))
+	} else {
+		fmt.Printf("Client started. Sockets: %d, Server Ports: %d, TUN: %s (waiting for config)\n", 
+			*numSockets, len(serverAddrs), *tunName)
+	}
 	select {}
 }

@@ -80,8 +80,11 @@ func (e *Engine) tunToUDP(ctx context.Context) {
 }
 
 func (e *Engine) handleOutbound(packet []byte) {
+	dstIP, _ := GetDstIP(packet)
+	fmt.Printf("Outbound packet: dst=%s, len=%d\n", dstIP, len(packet))
 	session, err := e.router.Route(packet)
 	if err != nil || len(session.RemoteAddrs) == 0 || session.Cipher == nil {
+		fmt.Printf("No route for %s\n", dstIP)
 		return
 	}
 
