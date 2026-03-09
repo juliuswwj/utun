@@ -163,7 +163,7 @@ func setupClient(t *testing.T, ctx context.Context, ipCIDR string, priv ed25519.
 	engine.SetKeys(priv, serverPub)
 	engine.OnHandshakeAck = func(clientIP string, subnets []string) {
 		engine.SetTUNDevice(mockTun)
-		r.AddSubnet(ipnet.String(), serverSession)
+		r.AddSubnet(ipnet.String(), serverSession.ID)
 	}
 	
 	listener := transport.NewMultiPortListener([]int{0, 0})

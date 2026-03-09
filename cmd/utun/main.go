@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,7 +92,6 @@ func runServer() {
 	}
 	cfg := cfgMgr.Get()
 
-	// Server private key for signing HandshakeAcks
 	privB, err := crypto.LoadKeyFromFile(*keyPath)
 	if err != nil {
 		fmt.Printf("Failed to load server private key from %s: %v\n", *keyPath, err)
@@ -117,7 +117,7 @@ func runServer() {
 			return
 		}
 	}
-	t.Configure(ip.String(), strconv.Itoa(maskLen), 1400)
+	t.Configure(ip.String(), strconv.Itoa(maskLen), "", 1400) 
 
 	sm := transport.NewSessionManager()
 	r := router.NewRouter(sm)
@@ -195,13 +195,12 @@ func runClient() {
 		RemoteAddrs: serverAddrs,
 		Cipher:      ciph,
 		LastSeen:    time.Now(),
-		StaticIP:    "", // Client doesn't know server's TUN IP yet; it's added to router via subnets later
+		StaticIP:    "", 
 	}
 	sm.Add(serverSession)
 	
-	// Create engine without TUN device initially (it will be configured after handshake)
 	engine := router.NewEngine(nil, r, sm, nil)
-	engine.SetKeys(priv, serverPub) // Use server public key for ACK verification
+	engine.SetKeys(priv, serverPub) 
 	engine.SetListener(listener)
 
 	var tunOnce sync.Once
@@ -226,24 +225,22 @@ func runClient() {
 					fmt.Printf("Failed to create TUN: %v\n", err)
 					return
 				}
+
+				exec.Command("sysctl", "-w", "net.ipv6.conf."+*tunName+".disable_ipv6=0").Run()
+				exec.Command("sysctl", "-w", "net.ipv6.conf."+*tunName+".accept_ra=2").Run()
 			}
-			t.Configure(ip.String(), strconv.Itoa(maskLen), 1400)
+			t.Configure(ip.String(), strconv.Itoa(maskLen), "", 1400) 
 			
-			// Inject TUN into engine
 			engine.SetTUNDevice(t)
 			
-			// Add routes to server
-			r.AddSubnet(ipnet.String(), serverSession)
+			r.AddSubnet(ipnet.String(), serverSession.ID)
 			for _, sn := range subnets {
-				r.AddSubnet(sn, serverSession)
+				r.AddSubnet(sn, serverSession.ID)
 			}
 
-			// Proxy ARP support
 			if *proxyARP != "" {
 				ifi, err := net.InterfaceByName(*proxyARP)
-				if err != nil {
-					fmt.Printf("Proxy ARP interface error: %v\n", err)
-				} else {
+				if err == nil {
 					addrs, _ := ifi.Addrs()
 					var localIP net.IP
 					for _, addr := range addrs {
@@ -254,14 +251,28 @@ func runClient() {
 							}
 						}
 					}
-					
 					rawDev, err := router.NewLinuxRawDevice(*proxyARP)
-					if err != nil {
-						fmt.Printf("Failed to create raw device for Proxy ARP: %v\n", err)
-					} else {
+					if err == nil {
 						pa := router.NewProxyARP(*proxyARP, ifi.HardwareAddr, localIP, rawDev, r)
 						go pa.Run(context.Background())
-						fmt.Printf("Proxy ARP enabled on %s\n", *proxyARP)
+						
+						engine.SetLANSupport(*proxyARP, rawDev, ifi.HardwareAddr)
+						fmt.Printf("IPv6 RA and Proxy ARP enabled on %s\n", *proxyARP)
+
+						// Auto-sync global IPv6 to Proxy NDP
+						go func() {
+							ticker := time.NewTicker(10 * time.Second)
+							for range ticker.C {
+								utunIf, err := net.InterfaceByName(*tunName)
+								if err != nil { continue }
+								addrs, _ := utunIf.Addrs()
+								for _, addr := range addrs {
+									if ipn, ok := addr.(*net.IPNet); ok && !ipn.IP.IsLinkLocalUnicast() && !ipn.IP.IsLoopback() {
+										exec.Command("ip", "-6", "neigh", "add", "proxy", ipn.IP.String(), "dev", *proxyARP).Run()
+									}
+								}
+							}
+						}()
 					}
 				}
 			}
@@ -270,33 +281,19 @@ func runClient() {
 
 	engine.Start(context.Background())
 
-	// Randomized Handshake loop over multiple local sockets and remote ports
 	go func() {
 		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 		for {
-			// Rotate the oldest socket before sending heartbeat/handshake
 			if err := listener.RotateOne(); err != nil {
 				fmt.Printf("Socket rotation failed: %v\n", err)
-			} else {
-				fmt.Printf("Socket rotated. Current sockets: %d\n", len(listener.AllLocalAddrs()))
 			}
-			
 			handshake := transport.CreateHandshake(priv)
-			// Randomly pick one server address to handshake
 			dst := serverAddrs[rnd.Intn(len(serverAddrs))]
 			listener.WriteTo(handshake, dst)
-			
-			delay := 5 + rnd.Intn(10) // Speed up for testing
+			delay := 5 + rnd.Intn(10)
 			time.Sleep(time.Duration(delay) * time.Second)
 		}
 	}()
 
-	if *mockMode {
-		fmt.Printf("Client started (MOCK). Sockets: %d, Server Ports: %d, TUN: mock-tun (waiting for config)\n", 
-			*numSockets, len(serverAddrs))
-	} else {
-		fmt.Printf("Client started. Sockets: %d, Server Ports: %d, TUN: %s (waiting for config)\n", 
-			*numSockets, len(serverAddrs), *tunName)
-	}
 	select {}
 }

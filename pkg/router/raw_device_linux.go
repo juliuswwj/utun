@@ -20,9 +20,8 @@ func NewLinuxRawDevice(ifaceName string) (*LinuxRawDevice, error) {
 		return nil, err
 	}
 
-	// Use ETH_P_ARP to only receive ARP packets and reduce overhead.
-	// If we need more protocols later, we can use ETH_P_ALL.
-	proto := htons(unix.ETH_P_ARP)
+	// Use ETH_P_ALL to support both ARP and IPv6 (for RA/NDP)
+	proto := htons(unix.ETH_P_ALL)
 	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(proto))
 	if err != nil {
 		return nil, err
@@ -61,6 +60,14 @@ func (d *LinuxRawDevice) WritePacketData(data []byte) error {
 		Ifindex: d.ifIndex,
 	}
 	return unix.Sendto(d.fd, data, 0, sll)
+}
+
+func (d *LinuxRawDevice) Write(b []byte) (int, error) {
+	err := d.WritePacketData(b)
+	if err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }
 
 func (d *LinuxRawDevice) Close() {
