@@ -344,11 +344,14 @@ func (e *Engine) handleHandshake(raw []byte, addr *net.UDPAddr) {
 			for _, subnet := range peer.Subnets { e.router.AddSubnet(subnet, s.ID) }
 			
 			var respSubnets []string
-			// 1. Include server's own network prefix so client can use it for device mask
+			// 1. Include server's own network prefix
 			respSubnets = append(respSubnets, cfg.TunIP) 
 			
-			// 2. Include all known peers' static IPs and subnets
+			// 2. Include all OTHER peers' static IPs and subnets
 			for _, p := range cfg.Peers {
+				if p.PublicKey == peer.PublicKey {
+					continue // Skip self
+				}
 				if p.StaticIP != "" { respSubnets = append(respSubnets, p.StaticIP) }
 				respSubnets = append(respSubnets, p.Subnets...)
 			}

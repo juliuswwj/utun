@@ -209,12 +209,12 @@ func runClient() {
 		tunOnce.Do(func() {
 			fmt.Printf("Received configuration: IP=%s, Subnets=%v\n", clientIPCIDR, subnets)
 			
-			// 1. First subnet in list is used for device mask configuration
+			var localNet *net.IPNet
 			globalMaskLen := "32"
 			if len(subnets) > 0 {
-				_, globalNet, err := net.ParseCIDR(subnets[0])
+				_, localNet, err = net.ParseCIDR(subnets[0])
 				if err == nil {
-					m, _ := globalNet.Mask.Size()
+					m, _ := localNet.Mask.Size()
 					globalMaskLen = strconv.Itoa(m)
 				}
 			}
@@ -240,20 +240,21 @@ func runClient() {
 				exec.Command("sysctl", "-w", "net.ipv6.conf."+*tunName+".accept_ra=2").Run()
 			}
 			
-			// Configure with native subnet mask
 			t.Configure(ip.String(), globalMaskLen, "", 1400) 
 			engine.SetTUNDevice(t)
 			
-			// 2. Setup routes for all provided subnets
 			for _, sn := range subnets {
 				r.AddSubnet(sn, serverSession.ID)
-				// Add specific /32 routes for individual IPs to avoid link-local ARP issues
-				if !strings.Contains(sn, "/") || strings.HasSuffix(sn, "/32") || strings.HasSuffix(sn, "/128") {
-					exec.Command("ip", "route", "add", sn, "dev", *tunName).Run()
-				} else {
-					// Add network route
-					exec.Command("ip", "route", "add", sn, "dev", *tunName).Run()
+				
+				// Avoid adding redundant routes that are already covered by the local interface network
+				targetIP, _, err := net.ParseCIDR(sn)
+				if err == nil && localNet != nil && localNet.Contains(targetIP) {
+					// Check if it's specifically a /32 for another peer (keep those)
+					if !strings.HasSuffix(sn, "/32") && !strings.HasSuffix(sn, "/128") && strings.Contains(sn, "/") {
+						continue // Redundant network route
+					}
 				}
+				exec.Command("ip", "route", "add", sn, "dev", *tunName).Run()
 			}
 
 			if *proxyARP != "" {
