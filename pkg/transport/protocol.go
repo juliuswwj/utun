@@ -14,7 +14,7 @@ const (
 	HeaderHandshakeAck = 0x82
 	HeaderSize         = 1 + 8 // 1 byte header + 8 byte SessionID/Timestamp
 	NonceSize          = 12
-	MaxPadding         = 256
+	MaxPadding         = 192
 	MinPacketSize      = HeaderSize + NonceSize + 1
 )
 

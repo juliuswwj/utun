@@ -38,7 +38,7 @@ func TestRouter_HasRoute(t *testing.T) {
 	sm.Add(s1)
 
 	r := NewRouter(sm)
-	r.AddSubnet("192.168.1.0/24", s1)
+	r.AddSubnet("192.168.1.0/24", s1.ID)
 
 	tests := []struct {
 		ip    string
@@ -119,7 +119,7 @@ func TestProxyARP_Dynamic(t *testing.T) {
 	// Case 3: Subnet from another client is added, should NOW respond
 	s_other := &transport.Session{ID: 2, StaticIP: "10.0.0.2"}
 	sm.Add(s_other)
-	r.AddSubnet("172.16.0.0/16", s_other)
+	r.AddSubnet("172.16.0.0/16", s_other.ID)
 	
 	subnetIP := net.ParseIP("172.16.1.1")
 	sendARPRequest(mockDev, subnetIP)

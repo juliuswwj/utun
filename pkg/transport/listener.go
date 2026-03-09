@@ -13,31 +13,36 @@ type IncomingPacket struct {
 	Nonce     []byte
 	Payload   []byte
 	Addr      *net.UDPAddr
-	Raw       []byte // For handshake or other control packets
+	Raw       []byte 
 }
 
-// MultiPortListener manages multiple UDP listeners with support for dynamic rotation.
+// MultiPortListener manages multiple UDP listeners.
 type MultiPortListener struct {
 	mu       sync.RWMutex
 	conns    []*net.UDPConn
-	packetCh chan IncomingPacket
 	stop     chan struct{}
 	wg       sync.WaitGroup
+	handler  func(p IncomingPacket) // Direct handler to avoid channel bottleneck
 }
 
 func NewMultiPortListener(ports []int) *MultiPortListener {
 	l := &MultiPortListener{
-		packetCh: make(chan IncomingPacket, 1024),
 		stop:     make(chan struct{}),
 	}
 	for _, p := range ports {
 		addr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", p))
 		conn, err := net.ListenUDP("udp", addr)
 		if err == nil {
+			conn.SetReadBuffer(8 * 1024 * 1024)
+			conn.SetWriteBuffer(8 * 1024 * 1024)
 			l.conns = append(l.conns, conn)
 		}
 	}
 	return l
+}
+
+func (l *MultiPortListener) SetHandler(h func(p IncomingPacket)) {
+	l.handler = h
 }
 
 func (l *MultiPortListener) Start() error {
@@ -52,7 +57,7 @@ func (l *MultiPortListener) Start() error {
 
 func (l *MultiPortListener) listen(conn *net.UDPConn) {
 	defer l.wg.Done()
-	buf := make([]byte, 2048)
+	buf := make([]byte, 4096) 
 
 	for {
 		select {
@@ -60,74 +65,66 @@ func (l *MultiPortListener) listen(conn *net.UDPConn) {
 			return
 		default:
 			n, addr, err := conn.ReadFromUDP(buf)
-			if err != nil {
-				return // Connection closed or error
-			}
-			if n < 1 {
-				continue
-			}
+			if err != nil { return }
+			if n < 1 || l.handler == nil { continue }
 
 			if buf[0] == HeaderHandshake || buf[0] == HeaderHandshakeAck {
 				raw := make([]byte, n)
 				copy(raw, buf[:n])
-				l.packetCh <- IncomingPacket{Addr: addr, Raw: raw}
+				l.handler(IncomingPacket{Addr: addr, Raw: raw})
 				continue
 			}
 
 			sessionID, nonce, payload, err := Unseal(buf[:n])
-			if err != nil {
-				continue
-			}
-			l.packetCh <- IncomingPacket{
+			if err != nil { continue }
+			
+			// Process immediately in serial to maintain order for fragments
+			l.handler(IncomingPacket{
 				SessionID: sessionID,
 				Nonce:     nonce,
 				Payload:   payload,
 				Addr:      addr,
-			}
+			})
 		}
 	}
 }
 
-func (l *MultiPortListener) Packets() <-chan IncomingPacket {
-	return l.packetCh
-}
-
-// WriteTo sends data using a random available connection.
 func (l *MultiPortListener) WriteTo(data []byte, addr *net.UDPAddr) error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if len(l.conns) == 0 {
 		return fmt.Errorf("no active connections")
 	}
-	idx := int(time.Now().UnixNano()) % len(l.conns)
+	
+	// Try to extract SessionID from data if it's a Data packet (HeaderData = 0x43)
+	// data[0] is Header, data[1..9] is SessionID
+	var idx int
+	if len(data) >= 9 && data[0] == 0x43 {
+		var sessionID uint64
+		for i := 0; i < 8; i++ {
+			sessionID |= uint64(data[1+i]) << (i * 8)
+		}
+		idx = int(sessionID % uint64(len(l.conns)))
+	} else {
+		idx = int(time.Now().UnixNano()) % len(l.conns)
+	}
+	
 	_, err := l.conns[idx].WriteToUDP(data, addr)
 	return err
 }
 
-// RotateOne closes the oldest connection and starts a new one on a random port.
 func (l *MultiPortListener) RotateOne() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
-	if len(l.conns) == 0 {
-		return nil
-	}
-
-	// Close the oldest one (index 0)
+	if len(l.conns) == 0 { return nil }
 	l.conns[0].Close()
-
-	// Create a new random port connection
 	addr, _ := net.ResolveUDPAddr("udp", ":0")
 	newConn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		return err
-	}
-
-	// Start new listener
+	if err != nil { return err }
+	newConn.SetReadBuffer(8 * 1024 * 1024)
+	newConn.SetWriteBuffer(8 * 1024 * 1024)
 	l.wg.Add(1)
 	go l.listen(newConn)
-
-	// Update slice: move index 0 to end and replace with new
 	l.conns = append(l.conns[1:], newConn)
 	return nil
 }
@@ -135,9 +132,7 @@ func (l *MultiPortListener) RotateOne() error {
 func (l *MultiPortListener) LocalAddr() *net.UDPAddr {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	if len(l.conns) == 0 {
-		return nil
-	}
+	if len(l.conns) == 0 { return nil }
 	return l.conns[0].LocalAddr().(*net.UDPAddr)
 }
 
@@ -154,9 +149,7 @@ func (l *MultiPortListener) AllLocalAddrs() []*net.UDPAddr {
 func (l *MultiPortListener) Stop() {
 	close(l.stop)
 	l.mu.Lock()
-	for _, conn := range l.conns {
-		conn.Close()
-	}
+	for _, conn := range l.conns { conn.Close() }
 	l.mu.Unlock()
 	l.wg.Wait()
 }

@@ -1,10 +1,13 @@
 # utun (UDP + TUN VPN)
 
-`utun` is a high-performance, secure private network tool written in Go. It uses TUN devices and obfuscated UDP tunnels to provide a seamless L3 VPN experience.
+`utun` is a high-performance, secure private network tool written in Go. It uses TUN devices and obfuscated UDP tunnels to provide a seamless dual-stack L3 VPN experience.
 
 ## Features
 
-- **L3 Routing**: Server-side routing for peer-to-peer communication between clients.
+- **Dual-Stack Support**: Full support for both IPv4 and IPv6 traffic.
+- **IPv6 SLAAC**: Built-in Router Advertisement (RA) generator for Stateless Address Autoconfiguration.
+- **Dynamic Routing**: Automatic learning of IPv6 client addresses and real-time injection of /128 kernel routes.
+- **Proxy ARP & NDP**: Transparently bridges VPN networks with local Ethernet segments for both IPv4 and IPv6.
 - **Ed25519 Authentication**: SSH-style public/private key authentication.
 - **Strong Encryption**: All traffic is encrypted using ChaCha20-Poly1305.
 - **UDP Obfuscation**:
@@ -13,8 +16,6 @@
     - Multi-port listening on the server.
     - Periodic socket rotation on the client.
 - **Hot Reloading**: Server configuration (`server.cfg`) can be updated without restarting.
-- **Static IP Management**: No DHCP, static IP to public key mapping for maximum predictability.
-- **Proxy ARP**: Transparently proxy ARP requests for the VPN network on a local Ethernet interface.
 
 ## Installation
 
@@ -30,8 +31,6 @@ go build ./cmd/utun
 
 ### 1. Generate Keys
 
-Generate Ed25519 key pairs for both server and clients.
-
 ```bash
 ./utun gen-key -o server.key
 ./utun gen-key -o client.key
@@ -39,69 +38,55 @@ Generate Ed25519 key pairs for both server and clients.
 
 ### 2. Configure Server
 
-Create `server.cfg`. The format for client mappings is:
-`<ClientIP>=<PublicKey>[,subnet1,subnet2...]`
+Create `server.cfg`:
 
 ```text
 # server.cfg
 ports=10000,10001
 ip=10.0.0.1/24
+ip6=2001:bb8:1:1::1/64
 tun=utun0
 
 # Client Mappings: <ClientIP>=<PublicKey>[,subnets...]
 10.8.0.2=f0e1d2c3b4a5...
-10.8.0.32=778695a4b3c2...,10.8.0.32/27
 ```
 
-Run the server (ensure `private.key` or the server's private key is in the current directory):
+Run the server:
 ```bash
-sudo ./utun server server.cfg
+sudo ./utun server server.cfg -key server.key
 ```
 
 ### 3. Run Client
 
-The client will automatically receive its IP and subnet configuration from the server during handshake.
+The client automatically receives configuration and performs SLAAC for IPv6.
 
 ```bash
-sudo ./utun client -s <server_ip>:10000 -key client.key
+sudo ./utun client -s <server_ip>:10000 -spub <server_public_key_hex> -key client.key -proxyarp eth0
 ```
 
-## Proxy ARP and Routing Modes
+## Automated Testing
 
-### 1. Routing Mode (Layer 3)
-Used when the local physical subnet (e.g., `192.168.1.0/24`) and the VPN network (`10.8.0.0/24`) are **non-overlapping**.
--   **Server Config**: `10.8.0.2=<ClientPubKey>,192.168.1.0/24`
--   **Client**: Acts as an L3 router.
+A comprehensive test script is included for unit tests, building, deployment, and cluster-wide connectivity verification.
 
-### 2. Proxy ARP Mode (Layer 2 Simulation)
-Used when the local physical subnet is **part of the larger VPN network**.
--   **Scenario**:
-    -   VPN Network: `10.8.0.0/24`.
-    -   Physical Segment assigned range: `10.8.0.32/27`.
--   **Server Config**: `10.8.0.32=<ClientPubKey>,10.8.0.32/27` (The client IP is the base of the range).
--   **Client Configuration**:
-    -   Gateway machine has `eth0` facing the physical wire and `utun1` facing the VPN.
-    -   Gateway `eth0` IP: `10.8.0.33/27` (or any IP in the `/27` range).
-    -   Gateway `utun1` IP: `10.8.0.32/24` (Configured automatically via server).
-    -   **Crucial**: Other devices on the physical wire must be configured with the larger `/24` mask so they believe remote VPN peers (like `10.8.0.1`) are on-link.
--   **IP Allocation**: Use **dnsmasq** on the Gateway to assign IPs in the `10.8.0.32/27` range to physical devices.
-
-#### Setup
 ```bash
-sudo ./utun client -s <server_ip>:10000 -key client.key -proxyarp eth0
+# Requires server.key and client.key to exist or be generated
+./test.sh
 ```
 
 ## Command Options
 
 ### Server
-- `utun server <config_file>`: Run server with the specified configuration file.
+- `utun server [options] <config_file>`
+- `-key`: Path to the private key file (default: `private.key`).
+- `-mock`: Use mock TUN device for testing.
 
 ### Client
 - `-s`: Comma-separated server addresses (`ip:port`).
+- `-spub`: Server public key (hex) for authentication.
 - `-key`: Path to the private key file.
 - `-sockets`: Number of local sockets for rotation (default: 2).
 - `-tun`: TUN interface name (default: `utun1`).
-- `-proxyarp`: Interface to enable Proxy ARP on (e.g., `eth0`).
+- `-proxyarp`: Interface to enable Proxy ARP and Proxy NDP on.
 
 ## License
 

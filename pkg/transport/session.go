@@ -47,6 +47,16 @@ func (sm *SessionManager) GetByID(id uint64) (*Session, bool) {
 	return s, ok
 }
 
+func (sm *SessionManager) GetAll() []*Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	res := make([]*Session, 0, len(sm.sessions))
+	for _, s := range sm.sessions {
+		res = append(res, s)
+	}
+	return res
+}
+
 func (sm *SessionManager) GetByIP(ip string) (*Session, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()

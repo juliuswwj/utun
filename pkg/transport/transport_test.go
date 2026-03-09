@@ -74,6 +74,12 @@ func TestSessionManager(t *testing.T) {
 func TestMultiPortListener(t *testing.T) {
 	// Use dynamic ports for testing
 	l := NewMultiPortListener([]int{0}) // 0 tells OS to choose a port
+	
+	packetChan := make(chan IncomingPacket, 1)
+	l.SetHandler(func(p IncomingPacket) {
+		packetChan <- p
+	})
+
 	if err := l.Start(); err != nil {
 		t.Fatalf("Failed to start listener: %v", err)
 	}
@@ -96,7 +102,7 @@ func TestMultiPortListener(t *testing.T) {
 	conn.Write(packet)
 	
 	select {
-	case p := <-l.Packets():
+	case p := <-packetChan:
 		if p.SessionID != sessionID {
 			t.Errorf("Got sessionID %d, want %d", p.SessionID, sessionID)
 		}

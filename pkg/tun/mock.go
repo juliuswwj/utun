@@ -47,6 +47,6 @@ func (m *MockDevice) Name() string {
 	return "mock-tun"
 }
 
-func (m *MockDevice) Configure(ip, mask string, mtu int) error {
+func (m *MockDevice) Configure(ip, mask string, ip6 string, mtu int) error {
 	return nil
 }

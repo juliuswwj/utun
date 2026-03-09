@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,11 +74,16 @@ func generateKeys() {
 }
 
 func runServer() {
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: utun server <config_file>")
+	fs := flag.NewFlagSet("server", flag.ExitOnError)
+	keyPath := fs.String("key", "private.key", "Path to private key")
+	mockMode := fs.Bool("mock", false, "Use mock TUN device")
+	fs.Parse(os.Args[2:])
+
+	if fs.NArg() < 1 {
+		fmt.Println("Usage: utun server [options] <config_file>")
 		return
 	}
-	configPath := os.Args[2]
+	configPath := fs.Arg(0)
 
 	cfgMgr, err := config.NewManager(configPath)
 	if err != nil {
@@ -86,11 +92,9 @@ func runServer() {
 	}
 	cfg := cfgMgr.Get()
 
-	// Server private key for signing HandshakeAcks
-	keyPath := "private.key"
-	privB, err := crypto.LoadKeyFromFile(keyPath)
+	privB, err := crypto.LoadKeyFromFile(*keyPath)
 	if err != nil {
-		fmt.Printf("Failed to load server private key: %v\n", err)
+		fmt.Printf("Failed to load server private key from %s: %v\n", *keyPath, err)
 		return
 	}
 	priv := ed25519.PrivateKey(privB)
@@ -102,12 +106,18 @@ func runServer() {
 	}
 	maskLen, _ := ipnet.Mask.Size()
 
-	t, err := tun.NewDevice(cfg.TunName)
-	if err != nil {
-		fmt.Printf("TUN error: %v\n", err)
-		return
+	var t tun.TUNDevice
+	if *mockMode {
+		t = tun.NewMockDevice()
+		fmt.Println("Using mock TUN device")
+	} else {
+		t, err = tun.NewDevice(cfg.TunName)
+		if err != nil {
+			fmt.Printf("TUN error: %v\n", err)
+			return
+		}
 	}
-	t.Configure(ip.String(), strconv.Itoa(maskLen), 1400)
+	t.Configure(ip.String(), strconv.Itoa(maskLen), "", 1400) 
 
 	sm := transport.NewSessionManager()
 	r := router.NewRouter(sm)
@@ -136,6 +146,7 @@ func runClient() {
 	tunName := fs.String("tun", "utun1", "TUN interface name")
 	numSockets := fs.Int("sockets", 2, "Number of local sockets (2-8)")
 	proxyARP := fs.String("proxyarp", "", "Interface to enable Proxy ARP on (e.g., eth0)")
+	mockMode := fs.Bool("mock", false, "Use mock TUN device")
 	fs.Parse(os.Args[2:])
 
 	if *serverAddrStr == "" || *serverPubHex == "" {
@@ -184,13 +195,12 @@ func runClient() {
 		RemoteAddrs: serverAddrs,
 		Cipher:      ciph,
 		LastSeen:    time.Now(),
-		StaticIP:    "", // Client doesn't know server's TUN IP yet; it's added to router via subnets later
+		StaticIP:    "", 
 	}
 	sm.Add(serverSession)
 	
-	// Create engine without TUN device initially (it will be configured after handshake)
 	engine := router.NewEngine(nil, r, sm, nil)
-	engine.SetKeys(priv, serverPub) // Use server public key for ACK verification
+	engine.SetKeys(priv, serverPub) 
 	engine.SetListener(listener)
 
 	var tunOnce sync.Once
@@ -198,35 +208,56 @@ func runClient() {
 	engine.OnHandshakeAck = func(clientIPCIDR string, subnets []string) {
 		tunOnce.Do(func() {
 			fmt.Printf("Received configuration: IP=%s, Subnets=%v\n", clientIPCIDR, subnets)
-			ip, ipnet, err := net.ParseCIDR(clientIPCIDR)
+			
+			var localNet *net.IPNet
+			globalMaskLen := "32"
+			if len(subnets) > 0 {
+				_, localNet, err = net.ParseCIDR(subnets[0])
+				if err == nil {
+					m, _ := localNet.Mask.Size()
+					globalMaskLen = strconv.Itoa(m)
+				}
+			}
+
+			ip, _, err := net.ParseCIDR(clientIPCIDR)
 			if err != nil {
 				fmt.Printf("Invalid IP from server: %v\n", err)
 				return
 			}
-			maskLen, _ := ipnet.Mask.Size()
 			
-			t, err := tun.NewDevice(*tunName)
-			if err != nil {
-				fmt.Printf("Failed to create TUN: %v\n", err)
-				return
+			var t tun.TUNDevice
+			if *mockMode {
+				t = tun.NewMockDevice()
+				fmt.Println("Using mock TUN device")
+			} else {
+				t, err = tun.NewDevice(*tunName)
+				if err != nil {
+					fmt.Printf("Failed to create TUN: %v\n", err)
+					return
+				}
+
+				exec.Command("sysctl", "-w", "net.ipv6.conf."+*tunName+".disable_ipv6=0").Run()
+				exec.Command("sysctl", "-w", "net.ipv6.conf."+*tunName+".accept_ra=2").Run()
 			}
-			t.Configure(ip.String(), strconv.Itoa(maskLen), 1400)
 			
-			// Inject TUN into engine
+			t.Configure(ip.String(), globalMaskLen, "", 1400) 
 			engine.SetTUNDevice(t)
 			
-			// Add routes to server
-			r.AddSubnet(ipnet.String(), serverSession)
 			for _, sn := range subnets {
-				r.AddSubnet(sn, serverSession)
+				r.AddSubnet(sn, serverSession.ID)
+				
+				// Avoid adding redundant kernel routes that are already covered by the local interface network
+				targetIP, _, err := net.ParseCIDR(sn)
+				if err == nil && localNet != nil && localNet.Contains(targetIP) {
+					// Skip adding to kernel if the subnet is part of our main interface network
+					continue 
+				}
+				exec.Command("ip", "route", "add", sn, "dev", *tunName).Run()
 			}
 
-			// Proxy ARP support
 			if *proxyARP != "" {
 				ifi, err := net.InterfaceByName(*proxyARP)
-				if err != nil {
-					fmt.Printf("Proxy ARP interface error: %v\n", err)
-				} else {
+				if err == nil {
 					addrs, _ := ifi.Addrs()
 					var localIP net.IP
 					for _, addr := range addrs {
@@ -237,14 +268,27 @@ func runClient() {
 							}
 						}
 					}
-					
 					rawDev, err := router.NewLinuxRawDevice(*proxyARP)
-					if err != nil {
-						fmt.Printf("Failed to create raw device for Proxy ARP: %v\n", err)
-					} else {
+					if err == nil {
 						pa := router.NewProxyARP(*proxyARP, ifi.HardwareAddr, localIP, rawDev, r)
 						go pa.Run(context.Background())
-						fmt.Printf("Proxy ARP enabled on %s\n", *proxyARP)
+						
+						engine.SetLANSupport(*proxyARP, rawDev, ifi.HardwareAddr)
+						fmt.Printf("IPv6 RA and Proxy ARP enabled on %s\n", *proxyARP)
+
+						go func() {
+							ticker := time.NewTicker(10 * time.Second)
+							for range ticker.C {
+								utunIf, err := net.InterfaceByName(*tunName)
+								if err != nil { continue }
+								addrs, _ := utunIf.Addrs()
+								for _, addr := range addrs {
+									if ipn, ok := addr.(*net.IPNet); ok && !ipn.IP.IsLinkLocalUnicast() && !ipn.IP.IsLoopback() {
+										exec.Command("ip", "-6", "neigh", "add", "proxy", ipn.IP.String(), "dev", *proxyARP).Run()
+									}
+								}
+							}
+						}()
 					}
 				}
 			}
@@ -253,26 +297,22 @@ func runClient() {
 
 	engine.Start(context.Background())
 
-	// Randomized Handshake loop over multiple local sockets and remote ports
+	fmt.Printf("Client started. Sockets: %d, Server Ports: %d, TUN: %s (waiting for config)\n", 
+		*numSockets, len(serverAddrs), *tunName)
+
 	go func() {
 		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 		for {
-			// Rotate the oldest socket before sending heartbeat/handshake
 			if err := listener.RotateOne(); err != nil {
 				fmt.Printf("Socket rotation failed: %v\n", err)
 			}
-			
 			handshake := transport.CreateHandshake(priv)
-			// Randomly pick one server address to handshake
 			dst := serverAddrs[rnd.Intn(len(serverAddrs))]
 			listener.WriteTo(handshake, dst)
-			
-			delay := 5 + rnd.Intn(175)
+			delay := 5 + rnd.Intn(10)
 			time.Sleep(time.Duration(delay) * time.Second)
 		}
 	}()
 
-	fmt.Printf("Client started. Sockets: %d, Server Ports: %d, TUN: %s (waiting for config)\n", 
-		*numSockets, len(serverAddrs), *tunName)
 	select {}
 }

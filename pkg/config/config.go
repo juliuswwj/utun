@@ -22,6 +22,7 @@ type PeerConfig struct {
 type Config struct {
 	Ports   []int
 	TunIP   string
+	TunIP6  string
 	TunName string
 	Peers   []PeerConfig
 }
@@ -83,6 +84,8 @@ func (m *Manager) Reload() error {
 			}
 		case "ip":
 			cfg.TunIP = val
+		case "ip6":
+			cfg.TunIP6 = val
 		case "tun":
 			cfg.TunName = val
 		default:

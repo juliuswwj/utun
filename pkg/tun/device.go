@@ -14,7 +14,7 @@ import (
 type TUNDevice interface {
 	io.ReadWriteCloser
 	Name() string
-	Configure(ip, mask string, mtu int) error
+	Configure(ip, mask string, ip6 string, mtu int) error
 }
 
 // Device represents a Linux TUN device.
@@ -45,8 +45,7 @@ func NewDevice(name string) (*Device, error) {
 		return nil, fmt.Errorf("failed to create TUN device: %v", errno)
 	}
 
-	actualName := string(ifr.name[:]) // Null-terminated string handling might be needed if not fully filled
-	// Trim null bytes
+	actualName := string(ifr.name[:])
 	for i, b := range ifr.name {
 		if b == 0 {
 			actualName = string(ifr.name[:i])
@@ -65,30 +64,27 @@ func (d *Device) Name() string {
 	return d.name
 }
 
-// Configure sets the IP address and MTU for the TUN device.
-func (d *Device) Configure(ip, mask string, mtu int) error {
-	// For simplicity and following the plan's mention of netlink, 
-	// but using 'ip' command as a reliable wrapper for configuration.
-	
+// Configure sets the IP addresses and MTU for the TUN device.
+func (d *Device) Configure(ip, mask string, ip6 string, mtu int) error {
 	// Set MTU
 	cmd := exec.Command("ip", "link", "set", "dev", d.name, "mtu", fmt.Sprintf("%d", mtu))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to set MTU: %v", err)
+	cmd.Run()
+
+	// Set IPv4
+	if ip != "" && mask != "" {
+		cmd = exec.Command("ip", "addr", "add", fmt.Sprintf("%s/%s", ip, mask), "dev", d.name)
+		cmd.Run()
 	}
 
-	// Set IP and mask
-	cmd = exec.Command("ip", "addr", "add", fmt.Sprintf("%s/%s", ip, mask), "dev", d.name)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to set IP: %v", err)
+	// Set IPv6
+	if ip6 != "" {
+		cmd = exec.Command("ip", "-6", "addr", "add", ip6, "dev", d.name)
+		cmd.Run()
 	}
 
 	// Bring interface up
 	cmd = exec.Command("ip", "link", "set", "dev", d.name, "up")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to bring up interface: %v", err)
-	}
-
-	return nil
+	return cmd.Run()
 }
 
 // Read reads a packet from the TUN device.
