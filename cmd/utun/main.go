@@ -246,13 +246,11 @@ func runClient() {
 			for _, sn := range subnets {
 				r.AddSubnet(sn, serverSession.ID)
 				
-				// Avoid adding redundant routes that are already covered by the local interface network
+				// Avoid adding redundant kernel routes that are already covered by the local interface network
 				targetIP, _, err := net.ParseCIDR(sn)
 				if err == nil && localNet != nil && localNet.Contains(targetIP) {
-					// Check if it's specifically a /32 for another peer (keep those)
-					if !strings.HasSuffix(sn, "/32") && !strings.HasSuffix(sn, "/128") && strings.Contains(sn, "/") {
-						continue // Redundant network route
-					}
+					// Skip adding to kernel if the subnet is part of our main interface network
+					continue 
 				}
 				exec.Command("ip", "route", "add", sn, "dev", *tunName).Run()
 			}
