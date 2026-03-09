@@ -208,7 +208,18 @@ func runClient() {
 	engine.OnHandshakeAck = func(clientIPCIDR string, subnets []string) {
 		tunOnce.Do(func() {
 			fmt.Printf("Received configuration: IP=%s, Subnets=%v\n", clientIPCIDR, subnets)
-			ip, ipnet, err := net.ParseCIDR(clientIPCIDR)
+			
+			// 1. First subnet in list is used for device mask configuration
+			globalMaskLen := "32"
+			if len(subnets) > 0 {
+				_, globalNet, err := net.ParseCIDR(subnets[0])
+				if err == nil {
+					m, _ := globalNet.Mask.Size()
+					globalMaskLen = strconv.Itoa(m)
+				}
+			}
+
+			ip, _, err := net.ParseCIDR(clientIPCIDR)
 			if err != nil {
 				fmt.Printf("Invalid IP from server: %v\n", err)
 				return
@@ -228,18 +239,21 @@ func runClient() {
 				exec.Command("sysctl", "-w", "net.ipv6.conf."+*tunName+".disable_ipv6=0").Run()
 				exec.Command("sysctl", "-w", "net.ipv6.conf."+*tunName+".accept_ra=2").Run()
 			}
-			t.Configure(ip.String(), "32", "", 1400) 
 			
+			// Configure with native subnet mask
+			t.Configure(ip.String(), globalMaskLen, "", 1400) 
 			engine.SetTUNDevice(t)
 			
-			// Route the whole assigned subnet to TUN
-			exec.Command("ip", "route", "add", ipnet.String(), "dev", *tunName).Run()
-			
-			r.AddSubnet(ipnet.String(), serverSession.ID)
+			// 2. Setup routes for all provided subnets
 			for _, sn := range subnets {
 				r.AddSubnet(sn, serverSession.ID)
-				// Also add kernel route for each received subnet
-				exec.Command("ip", "route", "add", sn, "dev", *tunName).Run()
+				// Add specific /32 routes for individual IPs to avoid link-local ARP issues
+				if !strings.Contains(sn, "/") || strings.HasSuffix(sn, "/32") || strings.HasSuffix(sn, "/128") {
+					exec.Command("ip", "route", "add", sn, "dev", *tunName).Run()
+				} else {
+					// Add network route
+					exec.Command("ip", "route", "add", sn, "dev", *tunName).Run()
+				}
 			}
 
 			if *proxyARP != "" {
@@ -263,7 +277,6 @@ func runClient() {
 						engine.SetLANSupport(*proxyARP, rawDev, ifi.HardwareAddr)
 						fmt.Printf("IPv6 RA and Proxy ARP enabled on %s\n", *proxyARP)
 
-						// Auto-sync global IPv6 to Proxy NDP
 						go func() {
 							ticker := time.NewTicker(10 * time.Second)
 							for range ticker.C {
@@ -284,6 +297,9 @@ func runClient() {
 	}
 
 	engine.Start(context.Background())
+
+	fmt.Printf("Client started. Sockets: %d, Server Ports: %d, TUN: %s (waiting for config)\n", 
+		*numSockets, len(serverAddrs), *tunName)
 
 	go func() {
 		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))

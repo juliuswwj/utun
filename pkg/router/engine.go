@@ -248,9 +248,6 @@ func (e *Engine) handleOutbound(packet []byte) {
 
 	session, err := e.router.Route(packet)
 	if err != nil || len(session.RemoteAddrs) == 0 || session.Cipher == nil {
-		if !strings.HasPrefix(dstIP, "ff02::") && !strings.HasPrefix(dstIP, "224.") {
-			fmt.Printf("OUTBOUND DROP: dst=%s, err=%v\n", dstIP, err)
-		}
 		return
 	}
 	e.sendPacketToSession(packet, session)
@@ -347,6 +344,10 @@ func (e *Engine) handleHandshake(raw []byte, addr *net.UDPAddr) {
 			for _, subnet := range peer.Subnets { e.router.AddSubnet(subnet, s.ID) }
 			
 			var respSubnets []string
+			// 1. Include server's own network prefix so client can use it for device mask
+			respSubnets = append(respSubnets, cfg.TunIP) 
+			
+			// 2. Include all known peers' static IPs and subnets
 			for _, p := range cfg.Peers {
 				if p.StaticIP != "" { respSubnets = append(respSubnets, p.StaticIP) }
 				respSubnets = append(respSubnets, p.Subnets...)
