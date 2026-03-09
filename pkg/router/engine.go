@@ -118,18 +118,14 @@ func (e *Engine) sendRALAN() {
 	srcLL := e.getLinkLocal(e.lanIfName)
 	if srcLL == nil { return }
 
-	// RA(16) + PIO(32) + SLLA(8) = 56 bytes ICMP
 	icmp := make([]byte, 56)
 	icmp[0] = 134; icmp[4] = 64
 	binary.BigEndian.PutUint16(icmp[6:8], 1800)
-	
 	pio := icmp[16:]
 	pio[0] = 3; pio[1] = 4; pio[2] = 64; pio[3] = 0xc0
 	binary.BigEndian.PutUint32(pio[4:8], 2592000)
 	binary.BigEndian.PutUint32(pio[8:12], 604800)
 	copy(pio[16:32], prefix.IP.To16())
-
-	// SLLA Option
 	slla := icmp[48:]
 	slla[0] = 1; slla[1] = 1
 	copy(slla[2:8], e.lanMAC)
@@ -161,7 +157,7 @@ func (e *Engine) sendRA(targetSession *transport.Session) {
 	srcLL := e.getLinkLocal(e.tun.Name())
 	if srcLL == nil { srcLL = net.ParseIP("fe80::1") }
 	
-	packet := make([]byte, 88) // Keeping existing size for simplicity
+	packet := make([]byte, 88) 
 	packet[0] = 6<<4; packet[6] = 58; packet[7] = 255
 	dstAll := net.ParseIP("ff02::1")
 	copy(packet[8:24], srcLL); copy(packet[24:40], dstAll)
@@ -230,18 +226,12 @@ func (e *Engine) tunToUDP(ctx context.Context) {
 			packet := make([]byte, n)
 			copy(packet, buf[:n])
 			
-			// t2 client logic: if packet is from LAN (learned) and going to VPN
 			if e.cfg == nil && n >= 40 && (packet[0]>>4) == 6 {
 				srcIP, _ := GetSrcIP(packet)
 				if e.lanPrefix != nil && e.lanPrefix.Contains(net.ParseIP(srcIP)) {
-					// Check if we need to learn this route back to LAN
-					// Actually, for outbound (from LAN to VPN), we just pass it to handleOutbound
-					// But we also need a kernel route on t2: ip -6 route add <t3_ip>/128 dev eth1
-					// so that return traffic from t1 knows to go to eth1 instead of looping back to utun1.
 					e.ensureKernelRoute(srcIP, e.lanIfName)
 				}
 			}
-			
 			e.handleOutbound(packet)
 		}
 	}
@@ -249,7 +239,6 @@ func (e *Engine) tunToUDP(ctx context.Context) {
 
 func (e *Engine) ensureKernelRoute(ip, ifName string) {
 	if ip == "" || ifName == "" || strings.HasPrefix(ip, "fe80:") { return }
-	// Best effort to avoid redundant shell calls
 	exec.Command("ip", "-6", "route", "add", ip+"/128", "dev", ifName).Run()
 }
 
@@ -259,6 +248,9 @@ func (e *Engine) handleOutbound(packet []byte) {
 
 	session, err := e.router.Route(packet)
 	if err != nil || len(session.RemoteAddrs) == 0 || session.Cipher == nil {
+		if !strings.HasPrefix(dstIP, "ff02::") && !strings.HasPrefix(dstIP, "224.") {
+			fmt.Printf("OUTBOUND DROP: dst=%s, err=%v\n", dstIP, err)
+		}
 		return
 	}
 	e.sendPacketToSession(packet, session)
@@ -281,8 +273,11 @@ func (e *Engine) udpToTUN(ctx context.Context) {
 			decrypted, err := crypto.Decrypt(session.Cipher, p.Nonce, p.Payload, nil)
 			if err != nil { continue }
 
+			srcIP, _ := GetSrcIP(decrypted)
+			dstIP, _ := GetDstIP(decrypted)
+
+			// IPv6 Learning
 			if len(decrypted) >= 40 && (decrypted[0]>>4) == 6 {
-				srcIP, _ := GetSrcIP(decrypted)
 				if !strings.HasPrefix(srcIP, "fe80:") && !e.router.HasRoute(net.ParseIP(srcIP)) {
 					fmt.Printf("Learned IPv6 route: %s via session %d\n", srcIP, session.ID)
 					e.router.AddSubnet(srcIP, session.ID)
@@ -293,13 +288,10 @@ func (e *Engine) udpToTUN(ctx context.Context) {
 				}
 			}
 
-			dstIP, err := GetDstIP(decrypted)
-			if err != nil { continue }
-
 			isForSelf := false
 			if strings.HasPrefix(dstIP, "fe80:") {
 				isForSelf = true
-			} else {
+			} else if e.tun != nil {
 				ifi, err := net.InterfaceByName(e.tun.Name())
 				if err == nil {
 					addrs, _ := ifi.Addrs()
@@ -309,16 +301,17 @@ func (e *Engine) udpToTUN(ctx context.Context) {
 						}
 					}
 				}
-				if !isForSelf && e.cfg != nil {
-					cfg := e.cfg.Get()
-					if ip, _, err := net.ParseCIDR(cfg.TunIP); err == nil && dstIP == ip.String() { isForSelf = true }
-					if !isForSelf && cfg.TunIP6 != "" {
-						ip, _, err := net.ParseCIDR(cfg.TunIP6); if err == nil && dstIP == ip.String() { isForSelf = true }
-					}
-					if !isForSelf && cfg.TunIP6 != "" {
-						_, ipnet, err := net.ParseCIDR(cfg.TunIP6); if err == nil && ipnet.Contains(net.ParseIP(dstIP)) {
-							if !e.router.HasRoute(net.ParseIP(dstIP)) { isForSelf = true }
-						}
+			}
+			
+			if !isForSelf && e.cfg != nil {
+				cfg := e.cfg.Get()
+				if ip, _, err := net.ParseCIDR(cfg.TunIP); err == nil && dstIP == ip.String() { isForSelf = true }
+				if !isForSelf && cfg.TunIP6 != "" {
+					ip, _, err := net.ParseCIDR(cfg.TunIP6); if err == nil && dstIP == ip.String() { isForSelf = true }
+				}
+				if !isForSelf && cfg.TunIP6 != "" {
+					_, ipnet, err := net.ParseCIDR(cfg.TunIP6); if err == nil && ipnet.Contains(net.ParseIP(dstIP)) {
+						if !e.router.HasRoute(net.ParseIP(dstIP)) { isForSelf = true }
 					}
 				}
 			}
@@ -327,7 +320,6 @@ func (e *Engine) udpToTUN(ctx context.Context) {
 				if e.tun != nil { e.tun.Write(decrypted) }
 			} else {
 				if e.cfg == nil {
-					// Client mode: arrived from tunnel, must go back to LAN via kernel
 					if e.tun != nil { e.tun.Write(decrypted) } 
 				} else {
 					e.handleOutbound(decrypted)
@@ -353,8 +345,14 @@ func (e *Engine) handleHandshake(raw []byte, addr *net.UDPAddr) {
 			e.sm.Add(s)
 			if peer.StaticIP != "" { e.router.AddSubnet(peer.StaticIP, s.ID) }
 			for _, subnet := range peer.Subnets { e.router.AddSubnet(subnet, s.ID) }
-			respSubnets := append([]string{}, peer.Subnets...)
+			
+			var respSubnets []string
+			for _, p := range cfg.Peers {
+				if p.StaticIP != "" { respSubnets = append(respSubnets, p.StaticIP) }
+				respSubnets = append(respSubnets, p.Subnets...)
+			}
 			if cfg.TunIP6 != "" { respSubnets = append(respSubnets, cfg.TunIP6) }
+
 			ack := transport.CreateHandshakeAck(e.privKey, peer.StaticIP, respSubnets)
 			e.udp.WriteTo(ack, addr)
 			fmt.Printf("Handshake success from %s\n", addr.String())
@@ -368,7 +366,6 @@ func (e *Engine) handleHandshakeAck(raw []byte) {
 	if e.serverPubKey == nil || e.OnHandshakeAck == nil { return }
 	clientIP, subnets, err := transport.VerifyHandshakeAck(raw, e.serverPubKey)
 	if err != nil { return }
-	
 	var v6Prefix *net.IPNet
 	for _, sn := range subnets {
 		if strings.Contains(sn, ":") {
@@ -380,6 +377,5 @@ func (e *Engine) handleHandshakeAck(raw []byte) {
 		}
 	}
 	if v6Prefix != nil { e.lanPrefix = v6Prefix }
-
 	e.OnHandshakeAck(clientIP, subnets)
 }

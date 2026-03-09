@@ -213,7 +213,6 @@ func runClient() {
 				fmt.Printf("Invalid IP from server: %v\n", err)
 				return
 			}
-			maskLen, _ := ipnet.Mask.Size()
 			
 			var t tun.TUNDevice
 			if *mockMode {
@@ -229,13 +228,18 @@ func runClient() {
 				exec.Command("sysctl", "-w", "net.ipv6.conf."+*tunName+".disable_ipv6=0").Run()
 				exec.Command("sysctl", "-w", "net.ipv6.conf."+*tunName+".accept_ra=2").Run()
 			}
-			t.Configure(ip.String(), strconv.Itoa(maskLen), "", 1400) 
+			t.Configure(ip.String(), "32", "", 1400) 
 			
 			engine.SetTUNDevice(t)
+			
+			// Route the whole assigned subnet to TUN
+			exec.Command("ip", "route", "add", ipnet.String(), "dev", *tunName).Run()
 			
 			r.AddSubnet(ipnet.String(), serverSession.ID)
 			for _, sn := range subnets {
 				r.AddSubnet(sn, serverSession.ID)
+				// Also add kernel route for each received subnet
+				exec.Command("ip", "route", "add", sn, "dev", *tunName).Run()
 			}
 
 			if *proxyARP != "" {
